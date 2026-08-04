@@ -1,6 +1,6 @@
 [English](#english)
 
-# Speech Bubble Editor for WebUI ReForge / Forge Neo
+# Speech Bubble Comic Editor for Forge Neo / Forge Neo
 <img width="1176" height="954" alt="{126C6A90-261D-4B95-BE33-5EDC0853064E}" src="https://github.com/user-attachments/assets/e5c8d67d-feb7-4952-a72c-5d7e0560a2be" />
 
 Version: **0.5.0**
