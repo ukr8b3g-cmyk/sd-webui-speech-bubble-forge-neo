@@ -666,6 +666,8 @@
     let sourceObjectUrl = null;
     let imageLoaded = false;
     let layoutDirty = false;
+    let layoutSaveInFlight = false;
+    let documentContextRevision = 0;
     let hasExplicitSavedLayout = false;
     let lastSavedLayout = "{}";
     let dirtyTrackingEnabled = false;
@@ -733,7 +735,7 @@
     async function generatedBackgroundId(name,tab,url){const cleanUrl=String(url||"").split("?")[0],fallback=cleanUrl.split("/").pop()||"speech_bubble",identity=`${String(tab||"unknown").toLowerCase()}\n${String(name||fallback).toLowerCase()}`;try{const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(identity));return`generated:${Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,"0")).join("")}`;}catch{let hash=2166136261;for(let index=0;index<identity.length;index++){hash^=identity.charCodeAt(index);hash=Math.imul(hash,16777619);}return`generated:${(hash>>>0).toString(16).padStart(8,"0")}`;}}
     async function storeGeneratedBackground(id,blob,name,tab,url){if(!id?.startsWith("generated:")||!blob)return;try{await storeCachedBackground({documentId:id,kind:"generated",blob,sourceName:name||"speech_bubble",sourceTab:tab||"",sourceUrl:String(url||"")});}catch(error){console.warn("Speech Bubble generated background save failed",error);}}
     function setSaveState(message,level="info"){const node=document.getElementById("saveState");if(!node)return;node.textContent=message;node.dataset.level=level;}
-    function updateActionState(){const hasImage=imageLoaded&&Boolean(image.naturalWidth);document.getElementById("saveLayout").disabled=!hasImage;document.getElementById("exportImage").disabled=!hasImage;document.getElementById("discardChanges").disabled=!hasImage||!layoutDirty;document.getElementById("emptyCanvasState").hidden=hasImage;if(!hasImage)setSaveState("画像を読み込んでください","info");else if(layoutDirty)setSaveState(autoSaveEnabled?"未保存の変更（下書き保存対象）":"未保存の変更があります","dirty");else if(hasExplicitSavedLayout)setSaveState("レイアウト保存済み","saved");else setSaveState("新規レイアウト","info");}
+    function updateActionState(){const hasImage=imageLoaded&&Boolean(image.naturalWidth);document.getElementById("saveLayout").disabled=!hasImage||layoutSaveInFlight;document.getElementById("exportImage").disabled=!hasImage;document.getElementById("discardChanges").disabled=!hasImage||!layoutDirty;document.getElementById("emptyCanvasState").hidden=hasImage;if(!hasImage)setSaveState("画像を読み込んでください","info");else if(layoutDirty)setSaveState(autoSaveEnabled?"未保存の変更（下書き保存対象）":"未保存の変更があります","dirty");else if(hasExplicitSavedLayout)setSaveState("レイアウト保存済み","saved");else setSaveState("新規レイアウト","info");}
     function markLayoutDirty(){if(!dirtyTrackingEnabled||!imageLoaded)return;layoutDirty=currentLayoutJson()!==lastSavedLayout;updateActionState();}
     let sfxBrowseMode="sfx";
     let sfxSortMode="recommended";
@@ -1989,12 +1991,24 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
       updateActionState();
     }
     function persistDraftNow(){
-      if(!autoSaveEnabled||!imageLoaded||!documentId||!layoutDirty)return;
-      const layout=currentLayoutJson();
-      try{localStorage.setItem(jsonKey,layout);localStorage.setItem(draftLayoutKey(),layout);touchDraftCache();}catch{}
-      if(documentMode==="standalone")try{localStorage.setItem(LAST_STANDALONE_ID_KEY,documentId);}catch{}
+      if(!layoutDirty)return true;
+      if(!autoSaveEnabled||!imageLoaded||!documentId)return false;
+      const layout=currentLayoutJson(),key=draftLayoutKey();
+      try{
+        // The document draft is durable; jsonKey is only a transient UI cache.
+        localStorage.setItem(key,layout);
+        if(documentMode==="standalone")localStorage.setItem(LAST_STANDALONE_ID_KEY,documentId);
+        touchDraftCache();
+        if(localStorage.getItem(key)!==layout)throw new Error("Draft was not retained");
+      }catch(error){
+        console.error("Speech Bubble autosave failed",error);
+        setSaveState("下書きを保存できませんでした。Save Layoutで保存するか、編集を続けてください。","error");
+        return false;
+      }
+      try{localStorage.setItem(jsonKey,layout);}catch{}
       postHost("speech_bubble:autosave_layout",{revision:renderRevision,image_hash:imageHash,document_id:documentId});
       setSaveState("下書きを自動保存しました","dirty");
+      return true;
     }
     function scheduleAutoSave(revision=renderRevision){
       if(!autoSaveEnabled||!imageLoaded||!documentId)return;
@@ -2022,24 +2036,40 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
       return blob;
     }
     async function saveLayoutExplicit(){
+      if(layoutSaveInFlight)return false;
       if(!imageLoaded||!documentId){setSaveState("背景画像を読み込んでください","error");return false;}
       const button=document.getElementById("saveLayout"),original=button.textContent,layout=currentLayoutJson();
-      button.disabled=true;button.textContent="Saving…";setSaveState("レイアウト保存中…","info");
+      const savingDocumentId=documentId,savingImageHash=imageHash,savingContext=documentContextRevision;
+      const isCurrent=()=>!editorClosed&&documentId===savingDocumentId&&imageHash===savingImageHash&&documentContextRevision===savingContext;
+      let failureMessage="";
+      layoutSaveInFlight=true;button.disabled=true;button.textContent="Saving…";setSaveState("レイアウト保存中…","info");
       try{
-        const response=await fetch(`${forgeApiBase}/layout/${encodeURIComponent(documentId)}`,{
+        const response=await fetch(`${forgeApiBase}/layout/${encodeURIComponent(savingDocumentId)}`,{
           method:"PUT",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({layout_json:layout,source_name:sourceName||"speech_bubble"}),
         });
         const payload=await response.json().catch(()=>({}));
         if(!response.ok||!payload.ok)throw new Error(payload.detail||`Layout save failed (${response.status})`);
-        try{localStorage.setItem(jsonKey,layout);localStorage.setItem(savedLayoutKey(),layout);removeDraftCache();}catch{}
-        if(documentMode==="standalone")try{localStorage.setItem(LAST_STANDALONE_ID_KEY,documentId);}catch{}
-        lastSavedLayout=layout;hasExplicitSavedLayout=true;layoutDirty=false;updateActionState();
-        postHost("speech_bubble:layout_saved",{image_hash:imageHash,document_id:documentId,layout_json:layout});
-        return true;
+        // An old request must not mark a switched/reloaded document as saved.
+        if(!isCurrent())return false;
+        lastSavedLayout=layout;hasExplicitSavedLayout=true;layoutDirty=currentLayoutJson()!==layout;
+        try{localStorage.setItem(savedLayoutKey(savingDocumentId),layout);}catch{}
+        if(!layoutDirty){
+          try{localStorage.setItem(jsonKey,layout);}catch{}
+          removeDraftCache(savingDocumentId);
+          if(documentMode==="standalone")try{localStorage.setItem(LAST_STANDALONE_ID_KEY,savingDocumentId);}catch{}
+          postHost("speech_bubble:layout_saved",{image_hash:savingImageHash,document_id:savingDocumentId,layout_json:layout});
+        }
+        // Save-and-replace may proceed only when the current content was saved.
+        return !layoutDirty;
       }catch(error){
-        console.error("Speech Bubble layout save failed",error);setSaveState(error?.message||"レイアウト保存に失敗しました","error");return false;
-      }finally{button.disabled=false;button.textContent=original;updateActionState();}
+        console.error("Speech Bubble layout save failed",error);
+        failureMessage=error?.message||"レイアウト保存に失敗しました";
+        return false;
+      }finally{
+        layoutSaveInFlight=false;button.textContent=original;updateActionState();
+        if(failureMessage&&isCurrent())setSaveState(failureMessage,"error");
+      }
     }
     function discardChanges(){
       if(!imageLoaded||!layoutDirty)return;
@@ -2133,6 +2163,7 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
       standaloneId=match?.[1]||createUuid();documentMode="standalone";documentId=`standalone:${standaloneId}`;
     }
     function clearDocumentCanvas(){
+      documentContextRevision+=1;
       clearTimeout(autoSaveTimer);autoSaveTimer=null;dirtyTrackingEnabled=false;
       if(sourceObjectUrl)URL.revokeObjectURL(sourceObjectUrl);
       sourceObjectUrl=null;sourceBlob=null;imageUrl="";imageHash="";imageLoaded=false;
@@ -2141,6 +2172,7 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
       state.undo=[];state.redo=[];syncProperties();fitView(false);requestRender({canvas:true,layers:true,preview:false});dirtyTrackingEnabled=true;updateActionState();
     }
     async function displayImageBlob(blob,{name="speech_bubble",tab=sourceTab,hash=""}={}){
+      documentContextRevision+=1;
       imageHash=hash||await hashImageBlob(blob);sourceTab=tab||sourceTab;sourceName=String(name||"speech_bubble").replace(/\.[^.]+$/,"").trim()||"speech_bubble";
       sourceBlob=blob;if(sourceObjectUrl)URL.revokeObjectURL(sourceObjectUrl);
       sourceObjectUrl=URL.createObjectURL(blob);imageUrl=sourceObjectUrl;await loadImageElement(sourceObjectUrl);imageLoaded=true;
@@ -2156,7 +2188,8 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
       startDeferredResources();
     }
     async function startStandaloneDocument(id,{offerResume=true}={}){
-      if(layoutDirty&&autoSaveEnabled)persistDraftNow();
+      refreshDirtyState();
+      if(layoutDirty&&autoSaveEnabled&&!persistDraftNow())return false;
       const requested=`standalone:${String(id||createUuid()).replace(/^standalone:/,"")}`;
       let selected=requested,background=null;
       if(offerResume){
@@ -2429,7 +2462,14 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
     document.getElementById("undo").onclick=undoAction; document.getElementById("redo").onclick=redoAction;
     function saveEditorWindowState(){const availableWidth=Number(screen.availWidth)||window.outerWidth||window.innerWidth,availableHeight=Number(screen.availHeight)||window.outerHeight||window.innerHeight,availableLeft=Number(screen.availLeft)||0,availableTop=Number(screen.availTop)||0,width=Math.round(window.outerWidth||window.innerWidth),height=Math.round(window.outerHeight||window.innerHeight),left=Math.round(Number.isFinite(window.screenX)?window.screenX:window.screenLeft||availableLeft),top=Math.round(Number.isFinite(window.screenY)?window.screenY:window.screenTop||availableTop),tolerance=32,maximized=Math.abs(width-availableWidth)<=tolerance&&Math.abs(height-availableHeight)<=tolerance&&Math.abs(left-availableLeft)<=tolerance&&Math.abs(top-availableTop)<=tolerance;try{localStorage.setItem(EDITOR_WINDOW_STATE_KEY,JSON.stringify({mode:maximized?"maximized":"windowed",width,height,left,top,updatedAt:Date.now()}));}catch{}}
     function cleanupTransientState(){clearTimeout(livePreviewTimer);livePreviewTimer=null;clearTimeout(autoSaveTimer);autoSaveTimer=null;try{localStorage.removeItem(jsonKey);}catch{}if(sourceObjectUrl){URL.revokeObjectURL(sourceObjectUrl);sourceObjectUrl=null;}}
-    function closeEditor(){if(editorClosed)return;if(layoutDirty&&!autoSaveEnabled&&!confirm("未保存の変更があります。保存せずに閉じますか？"))return;if(layoutDirty&&autoSaveEnabled)persistDraftNow();saveEditorWindowState();postHost("speech_bubble:editor_closing",{...editorConnectionState(),image_hash:imageHash,document_id:documentId});editorClosed=true;cleanupTransientState();postHost("speech_bubble:editor_closed",{image_hash:imageHash,document_id:documentId});window.close();}
+    function closeEditor(){
+      if(editorClosed)return;
+      refreshDirtyState();
+      if(layoutDirty&&!autoSaveEnabled&&!confirm("未保存の変更があります。保存せずに閉じますか？"))return;
+      if(layoutDirty&&autoSaveEnabled&&!persistDraftNow())return;
+      saveEditorWindowState();postHost("speech_bubble:editor_closing",{...editorConnectionState(),image_hash:imageHash,document_id:documentId});
+      editorClosed=true;cleanupTransientState();postHost("speech_bubble:editor_closed",{image_hash:imageHash,document_id:documentId});window.close();
+    }
     document.getElementById("closeEditor").onclick=closeEditor;
     document.getElementById("discardChanges").onclick=discardChanges;
     document.getElementById("saveLayout").onclick=saveLayoutExplicit;
@@ -2460,7 +2500,8 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
         document.documentElement.dataset.theme=data.theme==="light"?"light":"dark";
       }else if(data?.type==="speech_bubble:switch_context"&&data.mode==="standalone"){
         sourceTab=data.source_tab||sourceTab;sourceName=data.source_name||"speech_bubble";
-        startStandaloneDocument(data.documentId,{offerResume:true}).then(()=>{
+        startStandaloneDocument(data.documentId,{offerResume:true}).then(result=>{
+          if(result===false)return;
           postHost("speech_bubble:context_applied",{requestId:data.requestId,...editorConnectionState()});
         }).catch(error=>{console.error(error);setSaveState(error?.message||"単体編集を開始できませんでした","error");});
       }else if(data?.type==="speech_bubble:load_source"&&data.image_url){
@@ -2469,7 +2510,12 @@ function drawBasicSymbol(item,kind){const x=Number(item.x)||0,y=Number(item.y)||
         }).catch(error=>{console.error(error);setSaveState(error?.message||"画像を読み込めませんでした","error");});
       }
     });
-    window.addEventListener("beforeunload",event=>{if(editorClosed||autoSaveEnabled||!layoutDirty)return;event.preventDefault();event.returnValue="";});
+    window.addEventListener("beforeunload",event=>{
+      if(editorClosed)return;
+      refreshDirtyState();
+      if(!layoutDirty||(autoSaveEnabled&&persistDraftNow()))return;
+      event.preventDefault();event.returnValue="";
+    });
     window.addEventListener("pagehide",()=>{if(editorClosed)return;if(layoutDirty&&autoSaveEnabled)persistDraftNow();saveEditorWindowState();postHost("speech_bubble:editor_closing",{...editorConnectionState(),image_hash:imageHash,document_id:documentId});editorClosed=true;cleanupTransientState();postHost("speech_bubble:editor_closed",{image_hash:imageHash,document_id:documentId});});
     const properties=document.getElementById("properties");
     const shapePropertyKeys=new Set(["shape_intensity","shape_asymmetry","shape_roundness","spike_count","valley_style","valley_concavity","lobe_count","lobe_depth","shape_softness"]);

@@ -119,3 +119,18 @@ Settings再配置・起動パネル1行化（2026-07-24）:
 - WebUI Forge Neo実機でのEmphasis Lines最終表示・クリック／ドラッグ操作確認
 - WebUI Forge Neo実機でのUser Presets / Self Diagnostics確認
 - Python `pytest`（システムPython、Forge Neo venvともに未導入）
+
+## Maintenance validation (2026-10-06)
+
+Base: `55eb1b9886c57e6d6cc375f61cbbdaa7910adcd0`. This entry records the
+isolated Linux source checks, not a Forge Neo/Gradio/Windows acceptance run.
+
+- PASS: Python `python -m pytest -q`: 61 tests, zero failures/skips (35 existing plus 26 API/drawing regression cases).
+- PASS: all 10 `tests/*_test.cjs` scripts, including 20 save-integrity cases using actual extracted Editor functions with DOM/storage/network test doubles.
+- PASS: Python syntax (15 files), JavaScript syntax (3 files), both inline HTML scripts, and `git diff --check`.
+- Confirmed: late save responses preserve newer dirty content and drafts; switched/reloaded documents cannot be marked saved; save-and-replace is blocked if newer edits remain.
+- Confirmed: autosave quota/readback failures do not report success and block app Close/document switch; native beforeunload requests a warning when a durable draft cannot be written. Explicit Save Layout can still succeed via the backend.
+- Confirmed: invalid/missing Layout input leaves the existing file byte-identical; non-object Layout/Export/Presets JSON returns HTTP 400; explicit `{}` layouts remain supported.
+- Confirmed: overlap/radiant produce distinct Pillow output and still respect element opacity.
+- Unchanged: project/layout formats, runtime dependencies, image assets, generated-image export behavior, launcher focus/handshake logic (only its HTML cache revision changes).
+- NOT TESTED: real Forge Neo/Gradio integration, interactive Windows/browser acceptance, GPU generation. Browser unload warnings are not a guarantee against force-termination or operating-system failure.

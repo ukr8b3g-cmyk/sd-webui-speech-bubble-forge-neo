@@ -1930,12 +1930,6 @@ def _draw_bubble(layer, element, scale):
         body.putalpha(mask)
     layer.alpha_composite(body)
 
-def _apply_element_opacity(layer, element):
-    opacity = max(0.0, min(1.0, float(element.get("opacity", 1))))
-    if opacity < 1:
-        layer.putalpha(layer.getchannel("A").point(lambda value: int(value * opacity)))
-    return layer
-
     decoration_style = element.get("decoration_style")
     if decoration_style == "overlap" and stroke_width > 0:
         decoration = Image.new("RGBA", layer.size, (0, 0, 0, 0))
@@ -1981,6 +1975,13 @@ def _apply_element_opacity(layer, element):
                 width=max(1, int(stroke_width * (0.09 + wave_a * 0.18))),
             )
         layer.alpha_composite(decoration)
+
+
+def _apply_element_opacity(layer, element):
+    opacity = max(0.0, min(1.0, float(element.get("opacity", 1))))
+    if opacity < 1:
+        layer.putalpha(layer.getchannel("A").point(lambda value: int(value * opacity)))
+    return layer
 
 
 def _draw_text_layer(layer, element, default_font_path, scale):

@@ -223,10 +223,17 @@ def _multipart_part(parts: dict[str, bytes], name: str, limit: int, required: bo
     return value
 
 
+async def _json_object_request(request: Request) -> dict:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Request JSON must be an object")
+    return payload
+
+
 async def _export_request_payload(request):
     content_type = str(request.headers.get("content-type") or "")
     if not content_type.lower().startswith("multipart/form-data"):
-        return await request.json()
+        return await _json_object_request(request)
     raw = await _read_bounded_request_body(request, _MAX_EXPORT_MULTIPART_BYTES)
     parts = _parse_export_multipart(content_type, raw)
     metadata_raw = _multipart_part(
@@ -776,7 +783,7 @@ def register_routes(app):
 
     async def post_presets(request: Request):
         try:
-            payload = await request.json()
+            payload = await _json_object_request(request)
             presets = update_user_presets(preset_path(), payload)
             return {"version": 1, "presets": presets}
         except (ValueError, OSError, json.JSONDecodeError) as error:
@@ -813,8 +820,14 @@ def register_routes(app):
     async def put_layout(fingerprint: str, request: Request):
         try:
             document_id = _safe_document_id(fingerprint)
-            payload = await request.json()
-            normalized, parsed = _validate_layout(payload.get("layout_json", "{}"))
+            payload = await _json_object_request(request)
+            # Missing input is not an instruction to clear the saved layout.
+            raw_layout = payload.get("layout_json")
+            if not isinstance(raw_layout, (str, dict)) or (
+                isinstance(raw_layout, str) and not raw_layout.strip()
+            ):
+                raise ValueError("layout_json must be a JSON object or non-empty JSON string")
+            normalized, parsed = _validate_layout(raw_layout)
             wrapper = {
                 "version": 1,
                 "document_id": document_id,
